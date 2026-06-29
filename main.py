@@ -28,6 +28,8 @@ from .tools.angel_remember import CoreMemoryRememberTool
 from .tools.angel_recall import CoreMemoryRecallTool
 from .tools.angel_note_read import NoteRecallTool
 from .tools.angel_note_create import NoteCreateTool
+from .tools.angel_note_list import NoteListTool
+from .tools.angel_note_maintenance import NoteMaintenanceTool
 
 
 def configure_logging_behavior():
@@ -111,6 +113,8 @@ class AngelMemoryPlugin(Star):
                 CoreMemoryRememberTool(),
                 CoreMemoryRecallTool(),
                 NoteRecallTool(),
+                NoteListTool(),
+                NoteMaintenanceTool(),
             ]
             note_config = self.plugin_context.get_config("note_assistant", {}) or {}
             if note_config.get("enable_create", True):

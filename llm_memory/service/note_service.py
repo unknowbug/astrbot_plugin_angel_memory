@@ -86,6 +86,30 @@ class NoteService:
         results = self._format_chunk_results(raw_results)
         return self._enrich_with_short_ids(results)
 
+    async def search_notes_all(self) -> List[Dict]:
+        """列出所有笔记（返回索引注册表中的全部记录）。"""
+        memory_sql_manager = self._get_memory_sql_manager()
+        return await memory_sql_manager.list_all_note_index_records()
+
+    def rebuild_search_index(self) -> int:
+        """从切片库全量重建 Tantivy 搜索索引。"
+        
+        Returns:
+            索引的切片数量
+        """
+        search_engine = self._get_chunk_search_engine()
+        if search_engine is None:
+            self.logger.warning('搜索引擎不可用，无法重建索引')
+            return 0
+        chunk_store = self.plugin_context.get_component('note_chunk_store')
+        if chunk_store is None:
+            self.logger.warning('切片库不可用，无法重建索引')
+            return 0
+        all_chunks = chunk_store.list_all_chunks()
+        indexed = search_engine.rebuild_all(all_chunks)
+        self.logger.info(f'搜索索引全量重建完成: {len(all_chunks)} 切片 -> {indexed} 索引')
+        return indexed
+
     def _get_chunk_search_engine(self) -> Optional[NoteChunkSearchEngine]:
         """获取切片搜索引擎实例"""
         if self.plugin_context is None:
@@ -152,6 +176,25 @@ class NoteService:
             "请改用 angel_note_read(note_short_id + offset/limit)。"
         )
 
+    @staticmethod
+    def _extract_heading_h1(file_path: str) -> str:
+        """从文件内容中提取第一个 H1 标题（# 开头 或 #title）。"""
+        import re as _re
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith('# ') and not stripped.startswith('##'):
+                        return stripped[2:].strip()
+                    m = _re.match(r'^#[^#]', stripped)
+                    if m:
+                        return stripped[1:].strip()
+                    if stripped and not stripped.startswith('#'):
+                        break
+        except Exception:
+            pass
+        return ''
+
     def parse_and_store_file_sync(
         self,
         file_path: str,
@@ -186,12 +229,14 @@ class NoteService:
         timings["parse"] = (time.time() - t0) * 1000
 
         t0 = time.time()
+        heading_h1 = self._extract_heading_h1(file_path)
         asyncio.run(
             memory_sql_manager.upsert_note_file_entry(
                 file_id=str(file_id),
                 source_file_path=relative_path,
                 total_lines=total_lines,
                 updated_at=file_timestamp,
+                heading_h1=heading_h1,
             )
         )
         timings["store_total"] = (time.time() - t0) * 1000

@@ -633,6 +633,7 @@ class MemorySqlManager:
         source_file_path: str,
         total_lines: int = 0,
         updated_at: Optional[float] = None,
+        heading_h1: str = '',
     ) -> Dict[str, int]:
         return await asyncio.to_thread(
             self._upsert_note_file_entry_sync,
@@ -640,6 +641,7 @@ class MemorySqlManager:
             source_file_path,
             total_lines,
             updated_at,
+            heading_h1,
         )
 
     def _upsert_note_file_entry_sync(
@@ -648,6 +650,7 @@ class MemorySqlManager:
         source_file_path: str,
         total_lines: int = 0,
         updated_at: Optional[float] = None,
+        heading_h1: str = '',
     ) -> Dict[str, int]:
         fid = str(file_id or "").strip()
         rel_path = str(source_file_path or "").replace("\\", "/").strip().lstrip("/")
@@ -692,12 +695,12 @@ class MemorySqlManager:
                     heading_h1, heading_h2, heading_h3,
                     heading_h4, heading_h5, heading_h6,
                     total_lines, updated_at
-                ) VALUES (?, ?, ?, ?, '', '', '', '', '', '', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, '', '', '', '', '', ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     note_short_id=excluded.note_short_id,
                     file_id=excluded.file_id,
                     source_file_path=excluded.source_file_path,
-                    heading_h1='',
+                    heading_h1=excluded.heading_h1,
                     heading_h2='',
                     heading_h3='',
                     heading_h4='',
@@ -711,12 +714,29 @@ class MemorySqlManager:
                     note_short_id,
                     fid,
                     rel_path,
+                    heading_h1 or '',
                     int(total_lines or 0),
                     float(updated_at or time.time()),
                 ),
             )
             conn.commit()
         return {"scanned": 1, "upserted": 1, "failed": 0}
+
+    async def list_all_note_index_records(self) -> List[Dict[str, Any]]:
+        """列出所有笔记索引记录，包含标题和 short_id。"""
+        return await asyncio.to_thread(self._list_all_note_index_records_sync)
+
+    def _list_all_note_index_records_sync(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT
+                    note_short_id, file_id, source_file_path,
+                    IFNULL(heading_h1, '') AS heading_h1,
+                    total_lines, updated_at
+                FROM note_index_records
+                ORDER BY note_short_id ASC
+            """).fetchall()
+            return [dict(r) for r in rows]
 
     async def delete_note_index_by_file_id(self, file_id: str) -> List[str]:
         return await asyncio.to_thread(self._delete_note_index_by_file_id_sync, file_id)
