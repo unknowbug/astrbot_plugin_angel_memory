@@ -143,8 +143,7 @@ class NoteService:
                 fid_str = str(fid)
                 # 清理 note_index_records
                 try:
-                    import asyncio as _asyncio
-                    _asyncio.run(memory_sql_manager.delete_note_index_by_file_id(fid_str))
+                    memory_sql_manager._delete_note_index_by_file_id_sync(fid_str)
                 except Exception as e:
                     self.logger.warning(f'清理注册表失败 file_id={fid}: {e}')
                 
@@ -319,14 +318,12 @@ class NoteService:
 
         t0 = time.time()
         heading_h1 = self._extract_heading_h1(file_path)
-        asyncio.run(
-            memory_sql_manager.upsert_note_file_entry(
-                file_id=str(file_id),
-                source_file_path=relative_path,
-                total_lines=total_lines,
-                updated_at=file_timestamp,
-                heading_h1=heading_h1,
-            )
+        memory_sql_manager._upsert_note_file_entry_sync(
+            file_id=str(file_id),
+            source_file_path=relative_path,
+            total_lines=total_lines,
+            updated_at=file_timestamp,
+            heading_h1=heading_h1,
         )
         timings["store_total"] = (time.time() - t0) * 1000
 
@@ -427,22 +424,16 @@ class NoteService:
     def remove_file_data_by_file_id(self, file_id: int) -> bool:
         try:
             memory_sql_manager = self._get_memory_sql_manager()
-            asyncio.run(memory_sql_manager.delete_note_index_by_file_id(str(file_id)))
+            memory_sql_manager._delete_note_index_by_file_id_sync(str(file_id))
 
             if self.plugin_context is not None:
                 chunk_store = self.plugin_context.get_component("note_chunk_store")
                 if chunk_store is not None:
-                    try:
-                        chunk_store.delete_by_file_id(str(file_id))
-                    except Exception as e:
-                        self.logger.warning(f"删除切片存储失败（不影响主流程）: {e}")
+                    chunk_store.delete_by_file_id(str(file_id))
 
             search_engine = self._get_chunk_search_engine()
             if search_engine is not None:
-                try:
-                    search_engine.delete_by_file_id(str(file_id))
-                except Exception as e:
-                    self.logger.warning(f"删除切片索引失败（不影响主流程）: {e}")
+                search_engine.delete_by_file_id(str(file_id))
             return True
         except Exception as e:
             self.logger.error(f"根据file_id删除文件数据失败: {file_id}, 错误: {e}")
