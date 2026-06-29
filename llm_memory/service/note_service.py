@@ -92,22 +92,111 @@ class NoteService:
         return await memory_sql_manager.list_all_note_index_records()
 
     def rebuild_search_index(self) -> int:
-        """从切片库全量重建 Tantivy 搜索索引。"
+        """全量同步磁盘状态并重建 Tantivy 搜索索引。
+        
+        1. 扫描磁盘上的实际文件
+        2. 清理已删除文件的注册表/切片/Tantivy 条目
+        3. 新增未注册的文件
+        4. 从切片库全量重建 Tantivy 索引
         
         Returns:
             索引的切片数量
         """
-        search_engine = self._get_chunk_search_engine()
-        if search_engine is None:
-            self.logger.warning('搜索引擎不可用，无法重建索引')
+        import os as _os
+        from pathlib import Path as _Path
+        
+        # 1. 获取原始数据目录
+        if self.plugin_context is None:
+            self.logger.warning('plugin_context 不可用，无法重建索引')
             return 0
+        raw_dir = self.plugin_context.get_path_manager().get_raw_dir()
+        
+        # 2. 扫描磁盘上的文件
+        disk_files: set = set()
+        supported = {'.md', '.txt'}
+        if raw_dir.exists():
+            for root, _dirs, files in _os.walk(str(raw_dir)):
+                for fn in files:
+                    ext = _os.path.splitext(fn)[1].lower()
+                    if ext in supported:
+                        rel = _os.path.relpath(_os.path.join(root, fn), str(raw_dir))
+                        disk_files.add(rel.replace(chr(92), '/'))
+        
+        # 3. 获取注册表中的文件
+        file_manager = getattr(self, 'id_service', None)
+        file_manager = getattr(file_manager, 'file_manager', None) if file_manager else None
+        registered = file_manager.get_all_files() if file_manager else []
+        
+        # 4. 找出已删除的文件（在注册表中但不在磁盘上）
+        stale_ids = []
+        for entry in registered:
+            rel_path = entry.get('relative_path', '')
+            if rel_path not in disk_files:
+                stale_ids.append(entry.get('id'))
+        
+        # 5. 清理已删除文件的数据
+        if stale_ids:
+            self.logger.info(f'检测到 {len(stale_ids)} 个文件已从磁盘删除，正在清理索引残留')
+            memory_sql_manager = self._get_memory_sql_manager()
+            
+            for fid in stale_ids:
+                fid_str = str(fid)
+                # 清理 note_index_records
+                try:
+                    import asyncio as _asyncio
+                    _asyncio.run(memory_sql_manager.delete_note_index_by_file_id(fid_str))
+                except Exception as e:
+                    self.logger.warning(f'清理注册表失败 file_id={fid}: {e}')
+                
+                # 清理 chunk_store
+                chunk_store = self.plugin_context.get_component('note_chunk_store')
+                if chunk_store:
+                    try:
+                        chunk_store.delete_by_file_id(fid_str)
+                    except Exception as e:
+                        self.logger.warning(f'清理切片库失败 file_id={fid}: {e}')
+                
+                # 清理 Tantivy 索引
+                search_engine = self._get_chunk_search_engine()
+                if search_engine:
+                    try:
+                        search_engine.delete_by_file_id(fid_str)
+                    except Exception as e:
+                        self.logger.warning(f'清理搜索索引失败 file_id={fid}: {e}')
+                
+                # 清理 file_index_manager
+                if file_manager:
+                    try:
+                        file_manager.delete_file(fid)
+                    except Exception as e:
+                        self.logger.warning(f'清理文件索引失败 file_id={fid}: {e}')
+            
+            self.logger.info(f'已清理 {len(stale_ids)} 个已删除文件的所有索引数据')
+        
+        # 6. 新增磁盘上有但注册表中没有的文件
+        registered_paths = {e.get('relative_path', '') for e in registered if e.get('relative_path')}
+        # 排除已经被清理的
+        registered_paths = {p for p in registered_paths if p in disk_files}
+        new_files = disk_files - registered_paths
+        if new_files:
+            self.logger.info(f'检测到 {len(new_files)} 个未注册的文件，正在添加')
+            for rel_path in sorted(new_files):
+                full_path = str(raw_dir / rel_path)
+                try:
+                    self.parse_and_store_file_sync(full_path, rel_path, update_search_index=False)
+                except Exception as e:
+                    self.logger.warning(f'添加文件失败 {rel_path}: {e}')
+        
+        # 7. 从清理后的切片库全量重建 Tantivy 索引
         chunk_store = self.plugin_context.get_component('note_chunk_store')
-        if chunk_store is None:
-            self.logger.warning('切片库不可用，无法重建索引')
+        search_engine = self._get_chunk_search_engine()
+        if chunk_store is None or search_engine is None:
+            self.logger.warning('切片库或搜索引擎不可用，无法重建索引')
             return 0
+        
         all_chunks = chunk_store.list_all_chunks()
         indexed = search_engine.rebuild_all(all_chunks)
-        self.logger.info(f'搜索索引全量重建完成: {len(all_chunks)} 切片 -> {indexed} 索引')
+        self.logger.info(f'搜索索引全量重建完成: 清理={len(stale_ids)} 新增={len(new_files)} 切片={len(all_chunks)} 索引={indexed}')
         return indexed
 
     def _get_chunk_search_engine(self) -> Optional[NoteChunkSearchEngine]:
